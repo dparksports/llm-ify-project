@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from llm_ify.state import PipelineState
 
@@ -48,8 +48,8 @@ _HF_CFG_PATH = Path(__file__).resolve().parents[3] / ".agent" / "rules" / "hf_cf
 _OUTPUT_DIR = Path(__file__).resolve().parents[3] / "output"
 
 # LLM parameters
-_MODEL_NAME = "gpt-4o"
-_TEMPERATURE = 0.2
+_MODEL_NAME = "gemini-1.5-pro"
+_TEMPERATURE = 0.0
 _MAX_TOKENS = 16384
 
 
@@ -73,12 +73,13 @@ def _read_hf_cfg_rules() -> str:
         )
 
 
-def _get_llm(temperature: float = _TEMPERATURE) -> ChatOpenAI:
-    """Create a ChatOpenAI instance for code generation."""
-    return ChatOpenAI(
+def _get_llm(temperature: float = _TEMPERATURE) -> ChatGoogleGenerativeAI:
+    """Create a ChatGoogleGenerativeAI instance for code generation."""
+    return ChatGoogleGenerativeAI(
         model=_MODEL_NAME,
         temperature=temperature,
         max_tokens=_MAX_TOKENS,
+        max_retries=3,
     )
 
 

@@ -12,7 +12,7 @@ Implementing complex AI models from research papers often involves days of untan
 
 ## 🤖 What is it?
 
-LLM-IFY is a multi-agent LangGraph orchestrator powered by GPT-4o. It features a four-stage pipeline:
+LLM-IFY is a multi-agent LangGraph orchestrator powered by Gemini-1.5-Pro. It features a four-stage pipeline:
 
 1. **📄 Paper Summarizer**: Parses standard academic PDFs (via `fitz`/PyMuPDF), extracting exact mathematical formulations, pseudo-algorithms, and architectural novelties without losing structural integrity.
 2. **🕸️ Citation Crawler**: Detects implicit math dependencies (e.g., "We use the memory-efficient attention from [14]") and iteratively resolves them using web search or a localized Knowledge Base.
@@ -26,13 +26,13 @@ LLM-IFY is a multi-agent LangGraph orchestrator powered by GPT-4o. It features a
 Ensure you have Python 3.9+ and the required packages:
 
 ```bash
-pip install langchain langchain-openai langgraph pydantic pymupdf
+pip install langchain langchain-google-genai langgraph pydantic pymupdf
 ```
 
-You must also have an OpenAI api key set:
+You must also have a Google Gemini API key set:
 
 ```bash
-export OPENAI_API_KEY="sk-..."
+export GOOGLE_API_KEY="AIza..."
 ```
 
 ### Running the Pipeline

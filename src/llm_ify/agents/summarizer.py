@@ -26,8 +26,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import fitz  # PyMuPDF
+import os
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
 from llm_ify.pipeline.dag import build_repo_dag
@@ -42,8 +43,8 @@ from llm_ify.state import PipelineState
 _FALLBACK_MD = Path(__file__).resolve().parents[3] / "docs" / "paper_parsed.md"
 
 # LLM settings
-_MODEL_NAME = "gpt-4o"
-_TEMPERATURE = 0.1
+_MODEL_NAME = "gemini-1.5-pro"
+_TEMPERATURE = 0.0
 _MAX_TOKENS = 8192
 
 
@@ -82,7 +83,7 @@ class NovelComponent(BaseModel):
 class PaperStructuredOutput(BaseModel):
     """Structured extraction from a research paper.
 
-    This schema is used with ``ChatOpenAI.with_structured_output()``
+    This schema is used with ``ChatGoogleGenerativeAI.with_structured_output()``
     so the LLM returns validated, typed fields.
     """
 
@@ -176,12 +177,13 @@ def _read_fallback_markdown() -> str:
 # LLM helpers
 # ---------------------------------------------------------------------------
 
-def _get_llm(temperature: float = _TEMPERATURE) -> ChatOpenAI:
-    """Create a ChatOpenAI instance."""
-    return ChatOpenAI(
+def _get_llm(temperature: float = _TEMPERATURE) -> ChatGoogleGenerativeAI:
+    """Create a ChatGoogleGenerativeAI instance."""
+    return ChatGoogleGenerativeAI(
         model=_MODEL_NAME,
         temperature=temperature,
         max_tokens=_MAX_TOKENS,
+        max_retries=3,
     )
 
 

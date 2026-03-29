@@ -23,9 +23,9 @@ def main():
 
     cfg_rules = cfg_rules_path.read_text(encoding="utf-8")
 
-    # The pipeline uses GPT-4o, which requires OPENAI_API_KEY
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("Warning: OPENAI_API_KEY environment variable is not set.")
+    # The pipeline uses Gemini-1.5-Pro, which requires GOOGLE_API_KEY
+    if not os.environ.get("GOOGLE_API_KEY"):
+        print("Warning: GOOGLE_API_KEY environment variable is not set.")
         print("The pipeline will fail if the LLM cannot be reached.")
 
     print("🚀 Initializing LLM-IFY LangGraph Pipeline...")

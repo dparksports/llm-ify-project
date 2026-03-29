@@ -27,8 +27,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import os
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
 from llm_ify.state import PipelineState
@@ -42,8 +43,8 @@ _LOCAL_KB_PATH = (
     Path(__file__).resolve().parents[3] / ".agent" / "skills" / "dependencies.md"
 )
 
-_MODEL_NAME = "gpt-4o"
-_TEMPERATURE = 0.1
+_MODEL_NAME = "gemini-1.5-pro"
+_TEMPERATURE = 0.0
 _MAX_TOKENS = 8192
 
 
@@ -107,11 +108,12 @@ class ResolvedComponent(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_llm(temperature: float = _TEMPERATURE) -> ChatOpenAI:
-    return ChatOpenAI(
+def _get_llm(temperature: float = _TEMPERATURE) -> ChatGoogleGenerativeAI:
+    return ChatGoogleGenerativeAI(
         model=_MODEL_NAME,
         temperature=temperature,
         max_tokens=_MAX_TOKENS,
+        max_retries=3,
     )
 
 
