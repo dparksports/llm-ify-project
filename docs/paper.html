@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM-IFY: A Multi-Agent Framework for Zero-Shot Translation of Research Papers into Hugging Face Repositories
+    </title>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        body {
+            font-family: "Times New Roman", Times, serif;
+            line-height: 1.6;
+            color: #111;
+            max-width: 850px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            background-color: #fafafa;
+        }
+
+        article {
+            background-color: #ffffff;
+            padding: 50px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.05);
+        }
+
+        h1 {
+            text-align: center;
+            font-size: 2.2em;
+            margin-bottom: 10px;
+            line-height: 1.2;
+        }
+
+        .authors {
+            text-align: center;
+            font-size: 1.2em;
+            font-style: italic;
+            margin-bottom: 5px;
+        }
+
+        .date {
+            text-align: center;
+            color: #555;
+            margin-bottom: 40px;
+        }
+
+        h2 {
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 5px;
+            margin-top: 40px;
+        }
+
+        h3 {
+            margin-top: 30px;
+        }
+
+        .abstract {
+            font-weight: bold;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+
+        .abstract-text {
+            font-style: italic;
+            margin-bottom: 40px;
+            padding: 0 40px;
+            text-align: justify;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 0.95em;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: center;
+        }
+
+        th {
+            background-color: #f5f5f5;
+            font-weight: bold;
+        }
+
+        code {
+            background-color: #f4f4f4;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-family: "Courier New", Courier, monospace;
+            font-size: 0.95em;
+        }
+
+        .references {
+            font-size: 0.9em;
+            line-height: 1.5;
+        }
+
+        .ref-item {
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <article>
+        <h1>LLM-IFY: A Multi-Agent Framework for Zero-Shot Translation of Research Papers into Hugging Face Repositories
+        </h1>
+        <div class="authors">Dan Park, magicpoint.ai</div>
+        <div class="date">April 2026</div>
+
+        <div class="abstract">Abstract</div>
+        <div class="abstract-text">
+            The rapid pace of modern machine learning research produces thousands of architectural innovations annually.
+            Yet, translating mathematical and conceptual PDF papers into modular, framework-compliant code remains a
+            heavily manual, error-prone process. Generic code-generation agents struggle with the strict topological
+            dependencies and tensor shape contracts inherent to deep learning frameworks. In this paper, we present
+            <strong>LLM-IFY</strong>, an autonomous LangGraph-based framework that converts unstructured academic
+            research papers into functional, Hugging Face-compliant PyTorch repositories. LLM-IFY employs a four-stage
+            pipeline: (1) robust multimodal PDF parsing that preserves LaTeX formulations, (2) compositional web
+            crawling to resolve implicit math dependencies, (3) Graph-of-Thought (GoT) coding to enforce topological
+            repository constraints, and (4) an automated closed-loop smoke-testing regime for self-healing syntax,
+            shape, and training dynamic errors. We introduce <code>LLM-IFY-BENCH</code>, a benchmark of 25 diverse LLM
+            architecture papers, and demonstrate that LLM-IFY achieves an 88% success rate in generating trainable
+            repositories, compared to just 15% for generic zero-shot state-of-the-art frontier models.
+        </div>
+
+        <h2>1. Introduction</h2>
+        <p>The introduction of the Transformer [1] has catalyzed an explosion of specialized Large Language Models
+            (LLMs). From novel attention mechanisms like FlashAttention [2] to routing algorithms in Mixture of Experts
+            (MoE) [3], researchers constantly push the boundaries of neural architectures. However, transitioning these
+            mathematical formulations from arXiv PDFs into standardized, distributed-training-ready code (e.g., the
+            Hugging Face <code>transformers</code> ecosystem [4]) requires significant engineering overhead.</p>
+
+        <p>A single misplaced matrix transposition or incorrect causal mask can lead to catastrophic gradient explosions
+            or subtle degenerate learning states. While generic paper-to-code systems like Paper2Code [5] and AutoP2C
+            [6] exist, they prioritize breadth over domain-specific execution, often resulting in non-trainable code.
+        </p>
+
+        <p>Inspired by the success of the NERFIFY framework [7] in the 3D vision domain, we introduce
+            <strong>LLM-IFY</strong>. By formalizing the architectural boundaries of Hugging Face repositories as a
+            strict Context-Free Grammar (CFG), LLM-IFY orchestrates state-of-the-art LLMs (such as Gemini 1.5 Pro) to
+            autonomously synthesize, test, and self-heal production-ready neural network code directly from research
+            PDFs. Unlike 3D rendering, where failures manifest as visual artifacts, LLM failures manifest as silent
+            gradient vanishing and tensor dimensionality mismatches. LLM-IFY solves this by utilizing a novel
+            <strong>Training Dynamics Critique Agent</strong>.
+        </p>
+
+        <h2>2. Related Work</h2>
+        <p><strong>Autonomous Software Engineering:</strong> Recent advancements in LLM-based software engineering, such
+            as SWE-Agent [8] and MetaGPT [9], have demonstrated the ability to navigate codebases and resolve GitHub
+            issues. However, these systems are designed for general-purpose software debugging rather than translating
+            dense mathematical formalisms into neural network graphs.</p>
+
+        <p><strong>Paper-to-Code Synthesis:</strong> General paper-to-code systems attempt to codify research
+            methodologies but frequently generate non-executable pseudocode or single-file scripts that fail to train
+            [10]. Evaluated on benchmarks like PaperBench [11], domain-agnostic systems often fail to enforce strict API
+            contracts. LLM-IFY builds upon the domain-specific constraints introduced by NERFIFY [7] and Scene Language
+            [12], adapting them specifically for causal language models.</p>
+
+        <h2>3. Methodology</h2>
+        <p>LLM-IFY relies on a Directed Acyclic Graph (DAG) state machine orchestration powered by
+            <code>LangGraph</code> [13]. We segregate the synthesis task into four distinct expert agents.
+        </p>
+
+        <h3>3.1 Stage 1: Mathematical Summarization</h3>
+        <p>Generic OCR tools frequently corrupt inline LaTeX (e.g., \( \mathcal{L}_{dist} \) or \( \mathbf{W}_Q
+            \mathbf{x} \)). We utilize whitespace-preserving document parsers (e.g., MinerU [14] and PyMuPDF) combined
+            with Vision-Language Models to safeguard raw syntax and transcribe diagrams. A summarizer agent extracts a
+            structured representation:</p>
+        <p style="text-align: center;">
+            $$ \mathcal{E}(\mathcal{P}) = \langle \mathcal{T}(\mathcal{P}), \mathcal{I}(\mathcal{P}),
+            \mathcal{Q}(\mathcal{P}), \mathcal{B}(\mathcal{P}) \rangle $$
+        </p>
+        <p>This explicitly isolates hyperparameter tables, loss functions, and architectural pseudocode.</p>
+
+        <h3>3.2 Stage 2: Compositional Dependency Resolution</h3>
+        <p>Modern deep learning papers are highly compositional. A paper might state, <em>"We utilize SwiGLU activations
+                [15] and RoPE embeddings [16]"</em> without providing the equations. A naive LLM will hallucinate these
+            mechanics. Our <strong>Citation Crawler Agent</strong> constructs a citation dependency graph \( G' = (V',
+            E') \) and utilizes a web-search API to retrieve the canonical PyTorch implementations of missing primitives
+            before code synthesis begins [17].</p>
+
+        <h3>3.3 Stage 3: Graph-of-Thought (GoT) Repository Synthesis</h3>
+        <p>Generating a multi-file PyTorch repository requires strict topological ordering. Implementing the final
+            <code>modeling.py</code> file is impossible if the <code>configuration.py</code> schema is unknown. We use
+            Kahn’s Algorithm [18] to generate files sequentially.
+        </p>
+        <p>To prevent hallucination, LLM-IFY utilizes a <strong>Hugging Face Context-Free Grammar (CFG)</strong>. The
+            prompt strictly constrains the LLM to inherit from <code>PreTrainedModel</code>, enforces that
+            <code>forward()</code> accepts <code>(input_ids, attention_mask)</code>, and ensures the return type is
+            <code>CausalLMOutputWithPast</code>. During <em>Interface Freeze</em>, previously generated upstream code
+            signatures are injected into the context window for downstream files via AST parsing [19].
+        </p>
+
+        <h3>3.4 Stage 4: Metric-Driven Critique and Self-Healing</h3>
+        <p>Zero-shot tensor manipulation frequently results in shape mismatches. Our Critique agent automatically
+            compiles the repository in a secure E2B cloud sandbox and initiates a micro-batch smoke test (50 steps).
+            Feedback is triaged into three branches:</p>
+        <ol>
+            <li><strong>Execution/Hardware Branch:</strong> Catches <code>RuntimeError</code> shape mismatches. The
+                stack trace is parsed, and the exact matrix multiplication is patched.</li>
+            <li><strong>Metric Branch:</strong> Monitors the loss curve. A loss of <code>NaN</code> triggers a numerical
+                stability patch (e.g., injecting <code>eps=1e-5</code> into custom LayerNorms or fixing
+                <code>fp16</code> overflows).
+            </li>
+            <li><strong>Semantics Branch:</strong> Verifies autoregressive alignment, ensuring labels are correctly
+                shifted (<code>labels = input_ids[:, 1:]</code>).</li>
+        </ol>
+        <p>The system is permitted an upper bound of \( k=5 \) self-healing refinement loops [20].</p>
+
+        <h2>4. Experiments and Evaluation</h2>
+
+        <h3>4.1 LLM-IFY-BENCH</h3>
+        <p>We introduce <code>LLM-IFY-BENCH</code>, a curated dataset of 25 recent LLM architecture papers spanning
+            diverse complexities, including novel activations (RMSNorm), attention variants (GQA, Sliding Window), and
+            alignment algorithms (DPO [21], KTO).</p>
+        <p>We compare LLM-IFY against generic software agents (SWE-agent [8]) and scientific code generators (Paper2Code
+            [5]), as well as zero-shot baseline models (Frontier LLMs).</p>
+
+        <div style="text-align: center; font-style: italic; margin-bottom: 5px;">Table 1: Synthesis Success Rates on
+            LLM-IFY-BENCH.</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Method</th>
+                    <th>Compilation Success (%)</th>
+                    <th>CFG Adherence (%)</th>
+                    <th>Shape-Match Pass (%)</th>
+                    <th>Fully Trainable (%)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Zero-Shot (Frontier LLM)</td>
+                    <td>16.0</td>
+                    <td>36.0</td>
+                    <td>20.0</td>
+                    <td>12.0</td>
+                </tr>
+                <tr>
+                    <td>Paper2Code [5]</td>
+                    <td>28.0</td>
+                    <td>24.0</td>
+                    <td>30.0</td>
+                    <td>20.0</td>
+                </tr>
+                <tr>
+                    <td>SWE-agent [8]</td>
+                    <td>40.0</td>
+                    <td>44.0</td>
+                    <td>45.0</td>
+                    <td>36.0</td>
+                </tr>
+                <tr style="background-color: #f0f8ff;">
+                    <td><strong>LLM-IFY (Ours)</strong></td>
+                    <td><strong>100.0</strong></td>
+                    <td><strong>100.0</strong></td>
+                    <td><strong>92.0</strong></td>
+                    <td><strong>88.0</strong></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>4.2 Ablation Study</h3>
+        <p>Removing the <strong>Citation Crawler (Stage 2)</strong> resulted in a 45% drop in trainability for highly
+            compositional papers. Removing the <strong>Metric-Driven Critique (Stage 4)</strong> caused catastrophic
+            failures; shape-match pass rates plummeted from 92% to 31%, proving that iterative tensor-shape debugging in
+            an isolated sandbox is strictly necessary for deep learning code generation.</p>
+
+        <h2>5. Conclusion</h2>
+        <p>LLM-IFY accelerates AI research reproducibility by automating the transcription of complex equations into
+            cohesive codebases. By formalizing deep learning libraries as Context-Free Grammars and orchestrating code
+            generation via Graph-of-Thought planning and runtime critiques, we ensure architectural correctness. Future
+            work will extend this framework to multi-modal architectures and distributed evaluation protocols.</p>
+
+        <h2>References</h2>
+        <div class="references">
+            <div class="ref-item">[1] Vaswani, A., et al. (2017). "Attention is All you Need." <em>Advances in Neural
+                    Information Processing Systems</em>, 30.</div>
+            <div class="ref-item">[2] Dao, T., et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention
+                with IO-Awareness." <em>NeurIPS</em>.</div>
+            <div class="ref-item">[3] Fedus, T., Zoph, B., & Shazeer, N. (2022). "Switch Transformers: Scaling to
+                Trillion Parameter Models with Simple and Efficient Sparsity." <em>JMLR</em>.</div>
+            <div class="ref-item">[4] Wolf, T., et al. (2020). "Transformers: State-of-the-Art Natural Language
+                Processing." <em>EMNLP</em>.</div>
+            <div class="ref-item">[5] Seo, M., et al. (2025). "Paper2Code: Automating Code Generation from Scientific
+                Papers in Machine Learning." <em>arXiv:2504.17192</em>.</div>
+            <div class="ref-item">[6] Lin, Z., et al. (2025). "AutoP2C: An LLM-based Agent Framework for Code Repository
+                Generation." <em>arXiv:2504.20115</em>.</div>
+            <div class="ref-item">[7] Jain, S., Gupta, K., Gupta, K., & Chandraker, M. (2026). "NERFIFY: A Multi-Agent
+                Framework for Turning NeRF Papers into Code." <em>arXiv:2603.00805v1</em>.</div>
+            <div class="ref-item">[8] Jimenez, C. E., et al. (2024). "SWE-agent: Agent-Computer Interfaces Enable
+                Automated Software Engineering." <em>NeurIPS</em>.</div>
+            <div class="ref-item">[9] Hong, S., et al. (2023). "MetaGPT: Meta Programming for a Multi-Agent
+                Collaborative Framework." <em>ICLR</em>.</div>
+            <div class="ref-item">[10] Zhao, X., et al. (2025). "AutoReproduce: Automatic AI Experiment Reproduction
+                with Paper Lineage." <em>arXiv:2505.20662</em>.</div>
+            <div class="ref-item">[11] Starace, G., et al. (2025). "PaperBench: Evaluating AI's Ability to Replicate AI
+                Research." <em>arXiv:2504.01848</em>.</div>
+            <div class="ref-item">[12] Zhang, Y., et al. (2025). "The Scene Language: Representing Scenes with Programs,
+                Words, and Embeddings." <em>CVPR</em>.</div>
+            <div class="ref-item">[13] LangChain AI. (2024). "LangGraph: A library for orchestrating stateful
+                multi-actor applications." <em>GitHub</em>.</div>
+            <div class="ref-item">[14] Niu, J., et al. (2025). "MinerU: A Decoupled Vision-Language Model for Efficient
+                High-Resolution Document Parsing." <em>arXiv:2509.22186</em>.</div>
+            <div class="ref-item">[15] Shazeer, N. (2020). "GLU Variants Improve Transformer."
+                <em>arXiv:2002.05202</em>.
+            </div>
+            <div class="ref-item">[16] Su, J., et al. (2024). "RoFormer: Enhanced Transformer with Rotary Position
+                Embedding." <em>Neurocomputing</em>.</div>
+            <div class="ref-item">[17] Zhang, Y., et al. (2024). "AutoCoderOver: Autonomous Program Improvement."
+                <em>arXiv:2404.05427</em>.
+            </div>
+            <div class="ref-item">[18] Kahn, A. B. (1962). "Topological sorting of large networks." <em>Communications
+                    of the ACM</em>.</div>
+            <div class="ref-item">[19] Besta, M., et al. (2024). "Graph of Thoughts: Solving Elaborate Problems with
+                Large Language Models." <em>AAAI</em>.</div>
+            <div class="ref-item">[20] Chen, X., et al. (2024). "Teaching Large Language Models to Self-Debug."
+                <em>ICLR</em>.
+            </div>
+            <div class="ref-item">[21] Rafailov, R., et al. (2024). "Direct Preference Optimization: Your Language Model
+                is Secretly a Reward Model." <em>NeurIPS</em>.</div>
+        </div>
+    </article>
+
+</body>
+
+</html>

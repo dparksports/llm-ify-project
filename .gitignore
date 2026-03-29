@@ -30,7 +30,7 @@ build/
 
 # Parsed output intermediates
 docs/parsed_output/
-docs/*.html
+# docs/*.html
 
 
 # Environment variables
