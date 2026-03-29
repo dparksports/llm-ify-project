@@ -2,6 +2,8 @@
 
 Automating the translation of Deep Learning research papers into production-ready Hugging Face PyTorch repositories.
 
+![LLM-IFY Architecture Workflow](docs/infographic.png)
+
 ## 🤔 Why was it created?
 
 Implementing complex AI models from research papers often involves days of untangling dense mathematical notation, tracking down implicit dependencies from older papers, and ensuring strict compliance with frameworks like Hugging Face `transformers`. 
