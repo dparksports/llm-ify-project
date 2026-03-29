@@ -35,6 +35,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from llm_ify.pipeline.ast_parser import extract_signatures
+from llm_ify.prompts import GOT_CODER_PROMPT, GOT_CODER_USER_PROMPT
 from llm_ify.state import PipelineState
 
 
@@ -45,8 +46,8 @@ from llm_ify.state import PipelineState
 # Path to the HF CFG rules file (relative to project root)
 _HF_CFG_PATH = Path(__file__).resolve().parents[3] / ".agent" / "rules" / "hf_cfg.md"
 
-# Output directory for physically written files (relative to project root)
-_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "output"
+# Root output directory (per-model sub-dirs live under here)
+_OUTPUT_ROOT = Path(__file__).resolve().parents[3] / "output"
 
 # LLM parameters
 _MODEL_NAME = "gemini-1.5-pro"
@@ -154,86 +155,35 @@ def _build_resolved_components_section(
     return "\n\n".join(parts)
 
 
-def _write_output_files(generated_files: Dict[str, str]) -> Path:
-    """Write all generated files to the ``output/`` directory on disk.
+def _write_output_files(
+    generated_files: Dict[str, str],
+    architecture_name: str,
+) -> Path:
+    """Write all generated files to ``output/<architecture_name>/``.
 
-    Creates ``output/__init__.py`` if not already present in the file set.
+    Creates the sub-directory and an ``__init__.py`` if missing.
     Returns the output directory path.
     """
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = _OUTPUT_ROOT / architecture_name
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     for filename, code in generated_files.items():
-        filepath = _OUTPUT_DIR / filename
+        filepath = output_dir / filename
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(code, encoding="utf-8")
 
     # Ensure __init__.py always exists
-    init_path = _OUTPUT_DIR / "__init__.py"
+    init_path = output_dir / "__init__.py"
     if not init_path.exists():
         init_path.write_text(
             '"""Auto-generated model package."""\n',
             encoding="utf-8",
         )
 
-    return _OUTPUT_DIR
+    return output_dir
 
 
-# ---------------------------------------------------------------------------
-# Prompt templates
-# ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = textwrap.dedent("""\
-    You are a PyTorch code generation expert specializing in Hugging Face
-    transformers.  You MUST strictly follow the rules below — no exceptions.
-
-    ═══════════════════════════════════════════
-    STRICT RULES  (from .agent/rules/hf_cfg.md)
-    ═══════════════════════════════════════════
-    {cfg_rules}
-    ═══════════════════════════════════════════
-
-    Additional Hard Constraints:
-    • Every configuration class MUST inherit from `transformers.PretrainedConfig`.
-    • Every model class MUST inherit from `transformers.PreTrainedModel`.
-    • The model's `forward()` MUST accept `input_ids` and `attention_mask`.
-    • The model's `forward()` MUST return
-      `transformers.modeling_outputs.CausalLMOutputWithPast`.
-    • All hyperparameters MUST live in the Config class — never hard-coded.
-    • All sub-modules MUST be registered as `nn.Module` children.
-    • Use `safetensors` format for serialization.
-
-    Return your code inside a single ```python ... ``` fenced block.
-    Do NOT include any text outside the fenced block.
-""")
-
-
-_USER_PROMPT = textwrap.dedent("""\
-    ## Architecture (from paper)
-    {cleaned_markdown}
-
-    ## Resolved Mathematical Components
-    {resolved_components}
-
-    ## Previously Generated Files (Interface Freeze)
-    The files below have already been generated and their interfaces are
-    FROZEN.  You must import from them exactly as written.
-
-    {dependency_code}
-
-    {refinement_section}
-
-    ## Task
-    Write the complete, production-ready PyTorch code for `{current_file}`.
-
-    Requirements:
-    1. Implement every method completely — no placeholders, no `pass`, no `...`
-    2. All tensor operations must have correct shapes.
-    3. When labels are provided to forward(), compute cross-entropy loss
-       (left-shifted teacher forcing).
-    4. Support KV-cache via past_key_values / use_cache for incremental decoding.
-    5. All hyperparameters come from the Config object.
-    6. Produce ONLY the code inside a ```python``` block.
-""")
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +215,9 @@ def run_got_coder(state: PipelineState) -> dict:
     # ── Mark phase ──────────────────────────────────────────────────────
     state["generation_phase"] = "implement"
 
+    # ── Resolve architecture name for output directory ──────────────────
+    architecture_name: str = state.get("architecture_name", "custom_model")
+
     # ── Initialise generated_files if absent ────────────────────────────
     if "generated_files" not in state or state["generated_files"] is None:
         state["generated_files"] = {}
@@ -280,7 +233,7 @@ def run_got_coder(state: PipelineState) -> dict:
     # ── Read CFG rules from disk (injected verbatim) ────────────────────
     cfg_rules = _read_hf_cfg_rules()
 
-    system_prompt = _SYSTEM_PROMPT.format(cfg_rules=cfg_rules)
+    system_prompt = GOT_CODER_PROMPT.format(cfg_rules=cfg_rules)
 
     # ── Build refinement section (only if previous errors exist) ────────
     refinement_section = ""
@@ -324,7 +277,7 @@ def run_got_coder(state: PipelineState) -> dict:
         if len(cleaned_markdown) > 14000:
             paper_excerpt += "\n\n... (paper text truncated for token budget)"
 
-        user_prompt = _USER_PROMPT.format(
+        user_prompt = GOT_CODER_USER_PROMPT.format(
             cleaned_markdown=paper_excerpt,
             resolved_components=resolved_section,
             dependency_code=dependency_code,
@@ -341,8 +294,8 @@ def run_got_coder(state: PipelineState) -> dict:
         # ── Store in state ──────────────────────────────────────────────
         generated_files[current_file] = code
 
-    # ── Write files to output/ on disk ──────────────────────────────────
-    output_dir = _write_output_files(generated_files)
+    # ── Write files to output/<architecture_name>/ on disk ──────────────
+    output_dir = _write_output_files(generated_files, architecture_name)
 
     # ── Return state update ─────────────────────────────────────────────
     return {
@@ -370,8 +323,9 @@ def got_coder_node(state: PipelineState) -> Dict[str, Any]:
         result = run_got_coder(state)
 
         n_files = len(result.get("generated_files", {}))
+        arch = state.get("architecture_name", "custom_model")
         messages.append(
-            f"[Stage 3 - GoT Coder] ✅ Generated {n_files} files → output/"
+            f"[Stage 3 - GoT Coder] ✅ Generated {n_files} files → output/{arch}/"
         )
 
         # Merge messages/errors into the result

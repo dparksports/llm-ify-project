@@ -27,8 +27,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from e2b_code_interpreter import Sandbox
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from llm_ify.prompts import CRITIQUE_PROMPT
 from llm_ify.state import DiagnosticReport, PipelineState
 
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_MODEL_NAME = "gemini-1.5-pro"
+_TEMPERATURE = 0.2
+_MAX_TOKENS = 8192
+
+def _get_llm() -> ChatGoogleGenerativeAI:
+    return ChatGoogleGenerativeAI(
+        model=_MODEL_NAME,
+        temperature=_TEMPERATURE,
+        max_tokens=_MAX_TOKENS,
+        max_retries=3,
+    )
 
 # ---------------------------------------------------------------------------
 # Validation checks
@@ -144,8 +163,12 @@ def _try_syntax_check(code: str, filename: str) -> Optional[str]:
 def _run_sandbox_smoke_test(
     files: Dict[str, str],
     messages: List[str],
+    architecture_name: str = "custom_model",
 ) -> List[str]:
     """Write files to an E2B Sandbox and attempt to import them securely.
+
+    Files are placed under ``./output/{architecture_name}/`` inside the
+    sandbox to mirror the local directory structure.
 
     Returns a list of import error descriptions.
     """
@@ -160,7 +183,8 @@ def _run_sandbox_smoke_test(
 
     test_script_code = f"""import sys
 import os
-sys.path.insert(0, os.path.abspath('./src/llm_ify/generated'))
+gen_dir = os.path.abspath('./output/{architecture_name}')
+sys.path.insert(0, gen_dir)
 
 try:
 {chr(10).join("    " + i for i in imports)}
@@ -174,14 +198,14 @@ except Exception as e:
     messages.append("[Stage 4] 🛡️ Launching secure E2B Sandbox...")
     try:
         with Sandbox() as sbx:
-            # 2. Upload generated_files into the appropriate mock structure
-            sbx.commands.run("mkdir -p ./src/llm_ify/generated")
+            gen_path = f"./output/{architecture_name}"
+            sbx.commands.run(f"mkdir -p {gen_path}")
             for filename, code in files.items():
-                sbx.files.write(f"./src/llm_ify/generated/{filename}", code)
+                sbx.files.write(f"{gen_path}/{filename}", code)
                 
             # Provide an empty init if missing to make it a module
             if "__init__.py" not in files:
-                sbx.files.write("./src/llm_ify/generated/__init__.py", "")
+                sbx.files.write(f"{gen_path}/__init__.py", "")
 
             # 3. Upload smoke_test.py script
             sbx.files.write("smoke_test.py", test_script_code)
@@ -285,22 +309,37 @@ def critique_node(state: PipelineState) -> Dict[str, Any]:
     static_issues = _run_static_checks(code_files, messages)
 
     # ── Import smoke test via Secure Sandbox ────────────────────────────
-    import_issues = _run_sandbox_smoke_test(code_files, messages)
+    arch_name = state.get("architecture_name", "custom_model")
+    import_issues = _run_sandbox_smoke_test(code_files, messages, arch_name)
 
     # ── Build diagnostics ───────────────────────────────────────────────
     all_issues = static_issues + import_issues
     diagnostics = []
 
-    for issue in all_issues:
-        diag = DiagnosticReport(
-            detect=issue,
-            diagnose=issue,
-            recover="",
-            patch="",
-            action="RETRY" if iteration < 5 else "ACCEPT(low_confidence)",
-            confidence=0.3 if import_issues else 0.7,
-        )
-        diagnostics.append(diag.model_dump())
+    if all_issues:
+        messages.append("[Stage 4] Asking LLM Critique agent to diagnose failures...")
+        llm = _get_llm().with_structured_output(DiagnosticReport)
+        
+        for issue in all_issues:
+            prompt = CRITIQUE_PROMPT.format(error_trace=issue)
+            try:
+                diag: DiagnosticReport = llm.invoke([
+                    SystemMessage(content="You are a Senior PyTorch Debugger."),
+                    HumanMessage(content=prompt)
+                ])
+                diagnostics.append(diag.model_dump())
+            except Exception as exc:
+                # Fallback if structure parsing fails
+                messages.append(f"[Stage 4] LLM Critique Parsing Error (fallback used): {str(exc)[:100]}")
+                fallback = DiagnosticReport(
+                    detect=issue[:100],
+                    diagnose=issue,
+                    recover="Review HF CFG contract",
+                    patch="Self-repair using standard PyTorch semantics",
+                    action="RETRY" if iteration < 5 else "ACCEPT(low_confidence)",
+                    confidence=0.5,
+                )
+                diagnostics.append(fallback.model_dump())
 
     # ── Determine pass/fail ─────────────────────────────────────────────
     smoke_passed = len(all_issues) == 0

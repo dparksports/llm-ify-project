@@ -100,6 +100,7 @@ class PipelineState(TypedDict, total=False):
     # ── Inputs ──────────────────────────────────────────────────────────
     pdf_path: str                              # User-supplied path to the PDF
     cfg_rules: str                             # Contents of .agent/rules/hf_cfg.md
+    architecture_name: str                     # snake_case model name (e.g. 'deepseek_v3')
 
     # ── Stage 1: Summarizer ─────────────────────────────────────────────
     extracted_paper: Dict[str, Any]            # Serialised ExtractedPaper

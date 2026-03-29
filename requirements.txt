@@ -1,0 +1,8 @@
+langchain-google-genai
+langgraph
+pymupdf
+e2b_code_interpreter
+python-dotenv
+pydantic
+networkx
+click

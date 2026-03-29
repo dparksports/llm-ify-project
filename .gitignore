@@ -8,6 +8,7 @@ llmify/
 venv/
 .venv/
 env/
+env-llmify/
 
 # IDE
 .idea/
@@ -29,6 +30,8 @@ build/
 
 # Parsed output intermediates
 docs/parsed_output/
+docs/*.html
+
 
 # Environment variables
 .env

@@ -110,7 +110,11 @@ def build_graph() -> StateGraph:
 # Convenience runner
 # ---------------------------------------------------------------------------
 
-def run_pipeline(pdf_path: str, cfg_rules: str = "") -> Dict[str, Any]:
+def run_pipeline(
+    pdf_path: str,
+    cfg_rules: str = "",
+    architecture_name: str = "custom_model",
+) -> Dict[str, Any]:
     """One-shot pipeline execution.
 
     Parameters
@@ -119,6 +123,8 @@ def run_pipeline(pdf_path: str, cfg_rules: str = "") -> Dict[str, Any]:
         Absolute path to the research paper PDF.
     cfg_rules : str
         Contents of ``.agent/rules/hf_cfg.md`` to inject as constraints.
+    architecture_name : str
+        Snake-case model name.  Output lands in ``output/<name>/``.
 
     Returns
     -------
@@ -129,6 +135,7 @@ def run_pipeline(pdf_path: str, cfg_rules: str = "") -> Dict[str, Any]:
     initial_state: PipelineState = {
         "pdf_path": pdf_path,
         "cfg_rules": cfg_rules,
+        "architecture_name": architecture_name,
         "errors": [],
         "messages": [],
     }

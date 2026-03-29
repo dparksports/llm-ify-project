@@ -32,6 +32,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
 from llm_ify.pipeline.dag import build_repo_dag
+from llm_ify.prompts import SUMMARIZER_PROMPT
 from llm_ify.state import PipelineState
 
 
@@ -187,25 +188,7 @@ def _get_llm(temperature: float = _TEMPERATURE) -> ChatGoogleGenerativeAI:
     )
 
 
-_SYSTEM_PROMPT = """\
-You are a research paper analysis expert specializing in deep learning
-architectures and Hugging Face transformers.
 
-Your task is to extract structured information from a research paper.
-
-CRITICAL RULES:
-1. **Preserve ALL LaTeX math verbatim**.  Copy every equation exactly as
-   written — $$...$$, \\begin{{equation}}, inline $...$ — with no
-   simplification, no translation to prose, and no omission.
-2. **Preserve ALL pseudocode** verbatim.
-3. For file_dag: use the Hugging Face naming convention:
-   - configuration_<name>.py  (inherits PretrainedConfig, no deps)
-   - modeling_<name>.py       (inherits PreTrainedModel, depends on config)
-   - __init__.py              (re-exports, depends on all other files)
-4. architecture_name must be short snake_case (e.g. 'deepseek_v3').
-5. hyperparameters should include every numeric default mentioned in the
-   paper (hidden_size, num_layers, num_attention_heads, vocab_size, etc.).
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +236,7 @@ def run_summarizer(state: PipelineState) -> dict:
         paper_excerpt += "\n\n... (text truncated for token budget)"
 
     messages = [
-        SystemMessage(content=_SYSTEM_PROMPT),
+        SystemMessage(content=SUMMARIZER_PROMPT),
         HumanMessage(content=(
             "Analyze the following research paper and extract the requested "
             "structured information.  Remember: preserve ALL LaTeX math and "
@@ -318,10 +301,14 @@ def run_summarizer(state: PipelineState) -> dict:
         f"## Raw Paper Excerpt\n{paper_excerpt[:8000]}\n"
     )
 
+    # ── Resolve architecture name (CLI override takes precedence) ──────
+    arch_name = state.get("architecture_name") or structured.architecture_name or "custom_model"
+
     # ── Return state update ─────────────────────────────────────────────
     return {
         "extracted_paper": raw_text,
         "cleaned_markdown": cleaned_markdown,
+        "architecture_name": arch_name,
         "repo_dag": file_dag,
         "topo_order": topo_order,
     }
