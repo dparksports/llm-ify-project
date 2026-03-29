@@ -2,22 +2,26 @@
 
 Orchestrates the four NERFIFY-inspired stages as a directed graph:
 
-    summarizer → citation_crawler → got_coder → critique
-                                                   │
-                                                   ▼
-                                               (conditional)
-                                             pass? → END
-                                             fail? → got_coder (repair loop)
+    START → summarizer → citation_crawler → got_coder → critique
+                                                         │
+                                                         ▼
+                                                     (conditional)
+                                                   pass? → END
+                                                   fail? → got_coder (repair loop)
 
 The graph uses ``PipelineState`` as its shared state schema and
 delegates actual work to the four agent node functions.
+
+References:
+    Paper §3.2  — Four-stage pipeline
+    Table 5     — Ablation: every stage is critical
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 
 from llm_ify.agents.citation_crawler import citation_crawler_node
 from llm_ify.agents.critique import critique_node
@@ -39,9 +43,9 @@ def _should_refine(state: PipelineState) -> str:
     """Route after critique: loop back or finish.
 
     Termination criteria (§3.2, Stage 4):
-    1. smoke_test_passed is True  →  END
-    2. refinement_iteration ≥ MAX_REFINEMENT_LOOPS  →  END
-    3. Otherwise  →  loop back to got_coder for repair
+    1. smoke_test_passed is True                    → END
+    2. refinement_iteration ≥ MAX_REFINEMENT_LOOPS  → END
+    3. Otherwise                                    → got_coder (repair)
     """
     if state.get("smoke_test_passed", False):
         return "end"
@@ -57,6 +61,19 @@ def _should_refine(state: PipelineState) -> str:
 def build_graph() -> StateGraph:
     """Construct and compile the LLM-IFY LangGraph pipeline.
 
+    Nodes
+    -----
+    summarizer        — Stage 1: PDF parsing + structured extraction
+    citation_crawler   — Stage 2: Resolve missing citation dependencies
+    got_coder          — Stage 3: GoT code generation in topo order
+    critique           — Stage 4: Smoke-test validation + diagnostics
+
+    Edges
+    -----
+    START → summarizer → citation_crawler → got_coder → critique
+    critique → END       (if smoke_test_passed OR iteration ≥ 5)
+    critique → got_coder (repair loop otherwise)
+
     Returns
     -------
     compiled : CompiledGraph
@@ -70,8 +87,8 @@ def build_graph() -> StateGraph:
     graph.add_node("got_coder", got_coder_node)
     graph.add_node("critique", critique_node)
 
-    # ── Linear edges: Stage 1 → 2 → 3 → 4 ─────────────────────────────
-    graph.set_entry_point("summarizer")
+    # ── Linear edges: START → Stage 1 → 2 → 3 → 4 ─────────────────────
+    graph.add_edge(START, "summarizer")
     graph.add_edge("summarizer", "citation_crawler")
     graph.add_edge("citation_crawler", "got_coder")
     graph.add_edge("got_coder", "critique")

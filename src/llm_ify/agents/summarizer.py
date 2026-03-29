@@ -1,18 +1,22 @@
 """Stage 1 — Paper Summarizer Agent.
 
-Parses a research paper PDF via PyMuPDF and produces a structured
-``ExtractedPaper`` representation (Eqs. 2 & 3 from the NERFIFY paper).
+Parses a research paper PDF via PyMuPDF (``fitz``) and uses GPT-4o with
+``with_structured_output()`` to extract architecture metadata, novel
+components (with LaTeX math preserved verbatim), hyperparameters, and
+the Hugging Face file dependency DAG.
+
+The file DAG is then fed to ``BuildRepoDAG`` (pipeline/dag.py) to
+compute a validated topological order for downstream code generation.
 
 Key responsibilities:
-- Extract text preserving inline LaTeX ($$...$$ and \\begin{equation})
-- Split into structured fields: headings, paragraphs, equations,
-  algorithms, captions, references
-- Inject hf_cfg.md rules into state for downstream agents
-- Clean markdown: remove irrelevant sections, validate completeness
+- Extract text preserving inline LaTeX ($$...$$, \\begin{equation})
+- Produce structured output via Pydantic schema + LLM
+- Compute topo_order from the extracted file DAG
 
 References:
     Paper §3.2, Stage 1  — CFG Formalization and In-Context Learning
     Paper §3.1, Eqs. 2-3 — Paper representation E(P)
+    .agent/rules/hf_cfg.md — Output code constraints
 """
 
 from __future__ import annotations
@@ -22,31 +26,135 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import fitz  # PyMuPDF
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
-from llm_ify.state import Citation, ExtractedPaper, PipelineState
+from llm_ify.pipeline.dag import build_repo_dag
+from llm_ify.state import PipelineState
 
 
 # ---------------------------------------------------------------------------
-# PDF text extraction with LaTeX preservation
+# Constants
+# ---------------------------------------------------------------------------
+
+# Fallback markdown file when no PDF is provided
+_FALLBACK_MD = Path(__file__).resolve().parents[3] / "docs" / "paper_parsed.md"
+
+# LLM settings
+_MODEL_NAME = "gpt-4o"
+_TEMPERATURE = 0.1
+_MAX_TOKENS = 8192
+
+
+# ---------------------------------------------------------------------------
+# Pydantic schema for structured LLM output
+# ---------------------------------------------------------------------------
+
+class NovelComponent(BaseModel):
+    """A single novel component extracted from the paper.
+
+    All LaTeX math equations and pseudocode must be preserved
+    **verbatim** — do not simplify, translate, or paraphrase them.
+    """
+
+    name: str = Field(
+        ...,
+        description="Component name (e.g. 'Multi-Head Latent Attention', 'SwiGLU FFN')",
+    )
+    description: str = Field(
+        ...,
+        description=(
+            "Detailed description including the EXACT LaTeX math equations "
+            "($$...$$ or \\begin{equation}...\\end{equation}) and pseudocode "
+            "copied verbatim from the paper.  Do NOT simplify or omit any math."
+        ),
+    )
+    category: str = Field(
+        "",
+        description=(
+            "One of: 'attention', 'normalization', 'embedding', 'ffn', "
+            "'loss', 'architecture', 'training', 'other'"
+        ),
+    )
+
+
+class PaperStructuredOutput(BaseModel):
+    """Structured extraction from a research paper.
+
+    This schema is used with ``ChatOpenAI.with_structured_output()``
+    so the LLM returns validated, typed fields.
+    """
+
+    architecture_name: str = Field(
+        ...,
+        description=(
+            "Short snake_case name for the architecture "
+            "(e.g. 'deepseek_v3', 'zip_nerf').  Used as the suffix in "
+            "file names like configuration_<name>.py."
+        ),
+    )
+
+    novel_components: List[NovelComponent] = Field(
+        default_factory=list,
+        description=(
+            "Every novel architectural component described in the paper.  "
+            "Each entry MUST preserve the exact LaTeX math equations and "
+            "pseudocode verbatim — no paraphrasing."
+        ),
+    )
+
+    hyperparameters: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "All hyperparameters mentioned in the paper.  Keys are the "
+            "parameter names (snake_case), values are defaults from the paper "
+            "(e.g. {'hidden_size': 4096, 'num_layers': 32, 'vocab_size': 102400})."
+        ),
+    )
+
+    file_dag: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of each required Hugging Face repository file to a list "
+            "of files it depends on.  Must follow the HF naming convention:\n"
+            "  configuration_<name>.py  — PretrainedConfig (no dependencies)\n"
+            "  modeling_<name>.py       — PreTrainedModel (depends on config)\n"
+            "  __init__.py              — re-exports (depends on all others)\n"
+            "Example:\n"
+            '  {"configuration_custom.py": [], '
+            '"modeling_custom.py": ["configuration_custom.py"], '
+            '"__init__.py": ["configuration_custom.py", "modeling_custom.py"]}'
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PDF text extraction (LaTeX-preserving)
 # ---------------------------------------------------------------------------
 
 def _extract_pdf_text(pdf_path: str) -> str:
     """Extract text from a PDF, preserving mathematical notation.
 
-    Uses PyMuPDF's text extraction with whitespace preservation
-    to maintain LaTeX equation formatting.
+    Uses PyMuPDF's dictionary-based extraction with whitespace
+    preservation so LaTeX equation formatting ($$...$$,
+    \\begin{equation}, etc.) is kept as plain text.
     """
     doc = fitz.open(pdf_path)
     pages: List[str] = []
 
-    for i, page in enumerate(doc):
-        blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+    for page in doc:
+        blocks = page.get_text(
+            "dict", flags=fitz.TEXT_PRESERVE_WHITESPACE
+        )["blocks"]
         page_lines: List[str] = []
 
         for block in blocks:
             if block["type"] == 0:  # text block
                 for line in block["lines"]:
-                    line_text = "".join(span["text"] for span in line["spans"])
+                    line_text = "".join(
+                        span["text"] for span in line["spans"]
+                    )
                     page_lines.append(line_text)
 
         pages.append("\n".join(page_lines))
@@ -55,376 +163,207 @@ def _extract_pdf_text(pdf_path: str) -> str:
     return "\n\n".join(pages)
 
 
-# ---------------------------------------------------------------------------
-# Structured field extraction
-# ---------------------------------------------------------------------------
-
-# Patterns for splitting the raw text into structured components
-_HEADING_RE = re.compile(
-    r"^(\d+\.(?:\d+\.?)*\s+.+|Abstract|Introduction|Related Work|Method|"
-    r"Experiments|Conclusion|References|Appendix)",
-    re.MULTILINE,
-)
-
-_EQUATION_BLOCK_RE = re.compile(
-    r"(\\begin\{(?:equation|align|gather|multline)\*?\}.*?\\end\{(?:equation|align|gather|multline)\*?\})",
-    re.DOTALL,
-)
-
-_INLINE_EQUATION_RE = re.compile(
-    r"(\$\$[^$]+?\$\$|\$[^$]+?\$)",
-)
-
-# Numbered equations: a line ending with (N) where N is 1-3 digits
-_NUMBERED_EQ_RE = re.compile(
-    r"^(.+?)\s*\((\d{1,3})\)\s*$",
-    re.MULTILINE,
-)
-
-# Unicode math symbols commonly found in PDF-extracted text
-_UNICODE_MATH_RE = re.compile(
-    r"^(.{3,}?[=⟨⟩∈⊆∪∩≤≥→←∀∃∑∏∫⊂⊃⊄⊅≡≈≠±×÷·∇∂∞∅⟹⟸⟺∧∨¬].{2,})$",
-    re.MULTILINE,
-)
-
-_ALGORITHM_RE = re.compile(
-    r"(Algorithm\s+\d+[:\.].*?)(?=\n\n|\Z)",
-    re.DOTALL,
-)
-
-_FIGURE_CAPTION_RE = re.compile(
-    r"((?:Figure|Fig\.?|Table)\s+\d+[.:].*?)(?=\n\n|\Z)",
-    re.DOTALL | re.IGNORECASE,
-)
-
-# Multi-line bibliography: [N] Author ... year. pages
-_REFERENCE_START_RE = re.compile(
-    r"^\[(\d+)\]\s*(.*)$",
-    re.MULTILINE,
-)
-
-
-def _extract_headings(text: str) -> List[str]:
-    """Extract section headings."""
-    return [m.group(0).strip() for m in _HEADING_RE.finditer(text)]
-
-
-def _extract_equations(text: str) -> List[str]:
-    """Extract all mathematical equations from PDF-extracted text.
-
-    Handles:
-    - \\begin{equation}...\\end{equation} LaTeX blocks
-    - $$...$$ display math
-    - $...$ inline math
-    - Numbered equations: lines containing math symbols followed by (N)
-    - Lines with Unicode math symbols (⟨, ∈, ⊆, →, ∑, etc.)
-    """
-    equations: List[str] = []
-    seen: set = set()
-
-    def _add(eq: str) -> None:
-        eq = eq.strip()
-        if eq and eq not in seen and len(eq) > 2:
-            seen.add(eq)
-            equations.append(eq)
-
-    # Block equations (\\begin{equation}, etc.)
-    for m in _EQUATION_BLOCK_RE.finditer(text):
-        _add(m.group(1))
-
-    # Display and inline LaTeX ($$ and $)
-    for m in _INLINE_EQUATION_RE.finditer(text):
-        _add(m.group(1))
-
-    # Numbered equations: lines ending with (1), (2), etc.
-    # Also look for the content *above* the number line
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        # Line that is just a number in parens: "(1)"
-        if re.match(r"^\(\d{1,3}\)$", stripped):
-            # Grab the preceding non-empty line(s) as the equation
-            parts = []
-            for j in range(i - 1, max(i - 4, -1), -1):
-                prev = lines[j].strip()
-                if not prev or re.match(r"^\d+$", prev):  # page number or blank
-                    break
-                parts.insert(0, prev)
-            if parts:
-                _add(f"({stripped.strip('()')}) " + " ".join(parts))
-        # Line ending with (N)
-        m = _NUMBERED_EQ_RE.match(stripped)
-        if m:
-            _add(f"({m.group(2)}) {m.group(1).strip()}")
-
-    # Unicode math lines
-    for m in _UNICODE_MATH_RE.finditer(text):
-        candidate = m.group(1).strip()
-        # Skip if it's just a caption or heading
-        if not any(candidate.lower().startswith(skip) for skip in
-                   ["figure", "table", "fig.", "where", "the ", "this ", "our ", "we "]):
-            _add(candidate)
-
-    return equations
-
-
-def _extract_algorithms(text: str) -> List[str]:
-    """Extract pseudocode / algorithm blocks."""
-    return [m.group(1).strip() for m in _ALGORITHM_RE.finditer(text)]
-
-
-def _extract_captions(text: str) -> List[str]:
-    """Extract figure and table captions."""
-    return [m.group(1).strip() for m in _FIGURE_CAPTION_RE.finditer(text)]
-
-
-def _extract_references(text: str) -> List[Citation]:
-    """Extract bibliography entries as Citation objects.
-
-    Handles multi-line references typical of academic PDFs:
-        [1] Author Name. Title...
-        continuation of title. In Proceedings..., 2023. 6
-    """
-    citations: List[Citation] = []
-
-    # Find the References section
-    ref_section_match = re.search(
-        r"(?:^|\n)References\s*\n", text, re.IGNORECASE
+def _read_fallback_markdown() -> str:
+    """Read the pre-parsed markdown from docs/paper_parsed.md."""
+    if _FALLBACK_MD.exists():
+        return _FALLBACK_MD.read_text(encoding="utf-8")
+    raise FileNotFoundError(
+        f"No PDF provided and fallback not found at {_FALLBACK_MD}"
     )
-    if not ref_section_match:
-        return citations
-
-    ref_text = text[ref_section_match.end():]
-
-    # Split into individual reference blocks by [N] markers
-    ref_blocks: List[tuple] = []
-    for m in _REFERENCE_START_RE.finditer(ref_text):
-        ref_blocks.append((int(m.group(1)), m.start(), m.group(2)))
-
-    for idx, (ref_num, start, first_line) in enumerate(ref_blocks):
-        # Accumulate lines until next [N] or end
-        if idx + 1 < len(ref_blocks):
-            end = ref_blocks[idx + 1][1]
-        else:
-            end = len(ref_text)
-
-        block = ref_text[start:end]
-        # Remove the [N] prefix and join lines
-        block = re.sub(r"^\[\d+\]\s*", "", block)
-        raw = " ".join(line.strip() for line in block.split("\n") if line.strip())
-        # Remove trailing page numbers (e.g., "2, 4" or "6, 8")
-        raw = re.sub(r"\s+\d+(?:,\s*\d+)*\s*$", "", raw)
-
-        # Extract arXiv ID
-        arxiv_match = re.search(
-            r"arXiv[:\s]*(?:preprint\s+arXiv[:\s]*)?(\d{4}\.\d{4,5}(?:v\d+)?)", raw
-        )
-        arxiv_id = arxiv_match.group(1) if arxiv_match else None
-
-        # Try to extract year
-        year_match = re.search(r"(\d{4})", raw)
-        year = int(year_match.group(1)) if year_match else None
-
-        citations.append(
-            Citation(
-                ref_id=f"[{ref_num}]",
-                title=raw.strip(),
-                arxiv_id=arxiv_id,
-                year=year,
-            )
-        )
-
-    return citations
 
 
-def _extract_abstract(text: str) -> str:
-    """Extract the abstract section."""
-    # Look for text between "Abstract" heading and next section
-    match = re.search(
-        r"Abstract\s*\n(.+?)(?=\n\d+\.\s|\nIntroduction|\n1\s)",
-        text,
-        re.DOTALL,
+# ---------------------------------------------------------------------------
+# LLM helpers
+# ---------------------------------------------------------------------------
+
+def _get_llm(temperature: float = _TEMPERATURE) -> ChatOpenAI:
+    """Create a ChatOpenAI instance."""
+    return ChatOpenAI(
+        model=_MODEL_NAME,
+        temperature=temperature,
+        max_tokens=_MAX_TOKENS,
     )
-    return match.group(1).strip() if match else ""
 
 
-def _extract_title(text: str) -> str:
-    """Extract the paper title (first non-empty line)."""
-    for line in text.split("\n"):
-        line = line.strip()
-        if line and not line.startswith("arXiv") and len(line) > 10:
-            return line
-    return ""
+_SYSTEM_PROMPT = """\
+You are a research paper analysis expert specializing in deep learning
+architectures and Hugging Face transformers.
 
+Your task is to extract structured information from a research paper.
 
-def _split_paragraphs(text: str) -> List[str]:
-    """Split body text into paragraphs.
-
-    Joins hyphenated line breaks common in two-column PDFs
-    (e.g., 're-\nsearch' → 'research').
-    """
-    paragraphs: List[str] = []
-    current: List[str] = []
-
-    for line in text.split("\n"):
-        stripped = line.strip()
-
-        # Skip page markers
-        if stripped.startswith("<!-- PAGE"):
-            continue
-
-        if not stripped:
-            if current:
-                para = " ".join(current)
-                # De-hyphenate line breaks
-                para = re.sub(r"(\w)- (\w)", r"\1\2", para)
-                # Skip very short fragments, pure numbers, and reference lines
-                if len(para) > 50 and not para.startswith("[") and not re.match(r"^\d+$", para):
-                    paragraphs.append(para)
-                current = []
-        else:
-            current.append(stripped)
-
-    if current:
-        para = " ".join(current)
-        para = re.sub(r"(\w)- (\w)", r"\1\2", para)
-        if len(para) > 50:
-            paragraphs.append(para)
-
-    return paragraphs
+CRITICAL RULES:
+1. **Preserve ALL LaTeX math verbatim**.  Copy every equation exactly as
+   written — $$...$$, \\begin{{equation}}, inline $...$ — with no
+   simplification, no translation to prose, and no omission.
+2. **Preserve ALL pseudocode** verbatim.
+3. For file_dag: use the Hugging Face naming convention:
+   - configuration_<name>.py  (inherits PretrainedConfig, no deps)
+   - modeling_<name>.py       (inherits PreTrainedModel, depends on config)
+   - __init__.py              (re-exports, depends on all other files)
+4. architecture_name must be short snake_case (e.g. 'deepseek_v3').
+5. hyperparameters should include every numeric default mentioned in the
+   paper (hidden_size, num_layers, num_attention_heads, vocab_size, etc.).
+"""
 
 
 # ---------------------------------------------------------------------------
-# Markdown cleaning
+# Core engine
 # ---------------------------------------------------------------------------
 
-_IRRELEVANT_SECTIONS = {
-    "related work",
-    "acknowledgments",
-    "acknowledgements",
-    "author contributions",
-}
+def run_summarizer(state: PipelineState) -> dict:
+    """Parse the research paper and extract structured metadata via GPT-4o.
 
+    Steps
+    -----
+    1. Read raw text from ``state["pdf_path"]`` via PyMuPDF.
+       Falls back to ``docs/paper_parsed.md`` if no PDF is given.
+    2. Call GPT-4o with ``with_structured_output(PaperStructuredOutput)``
+       to get architecture_name, novel_components, hyperparameters,
+       and file_dag.
+    3. Pass file_dag to ``build_repo_dag`` to compute the topo_order.
+    4. Return the state update.
 
-def _clean_markdown(text: str, headings: List[str]) -> str:
-    """Remove irrelevant sections while preserving all equations and pseudocode.
+    Parameters
+    ----------
+    state : PipelineState
 
-    Strips:
-    - Extended "Related Work" discussions
-    - Acknowledgments
-    - Redundant references (kept in structured form)
-
-    Validates:
-    - Key technical headings from abstract still appear
-    """
-    lines = text.split("\n")
-    cleaned: List[str] = []
-    skip = False
-
-    for line in lines:
-        lower = line.strip().lower()
-
-        # Check if we should start skipping
-        for section in _IRRELEVANT_SECTIONS:
-            if lower.startswith(section) or (
-                re.match(r"^\d+\.?\s*", lower)
-                and section in lower
-            ):
-                skip = True
-                break
-
-        # Stop skipping at next major heading
-        if skip and re.match(r"^\d+\.\s+", line.strip()):
-            heading_lower = line.strip().lower()
-            if not any(s in heading_lower for s in _IRRELEVANT_SECTIONS):
-                skip = False
-
-        if not skip:
-            cleaned.append(line)
-
-    return "\n".join(cleaned)
-
-
-# ---------------------------------------------------------------------------
-# Main summarizer node
-# ---------------------------------------------------------------------------
-
-def summarizer_node(state: PipelineState) -> Dict[str, Any]:
-    """Parse the PDF and produce a cleaned, structured extraction.
-
-    Implements Stage 1 of the NERFIFY pipeline:
-    E(P) = ⟨T(P), I(P), Q(P), B(P)⟩  (Eq. 2)
-    T(P) = ⟨H, {pᵢ}, {aℓ}, {cₖ}, {rₘ}⟩  (Eq. 3)
+    Returns
+    -------
+    dict
+        ``{"extracted_paper": ..., "cleaned_markdown": ...,
+          "repo_dag": ..., "topo_order": ...}``
     """
     pdf_path = state.get("pdf_path", "")
-    cfg_rules = state.get("cfg_rules", "")
+
+    # ── Step 1: Extract raw text ────────────────────────────────────────
+    if pdf_path and Path(pdf_path).exists():
+        raw_text = _extract_pdf_text(pdf_path)
+    else:
+        raw_text = _read_fallback_markdown()
+
+    # ── Step 2: Structured extraction via GPT-4o ────────────────────────
+    llm = _get_llm()
+    structured_llm = llm.with_structured_output(PaperStructuredOutput)
+
+    # Truncate to ~30k chars to fit token limits while keeping math
+    paper_excerpt = raw_text[:30000]
+    if len(raw_text) > 30000:
+        paper_excerpt += "\n\n... (text truncated for token budget)"
+
+    messages = [
+        SystemMessage(content=_SYSTEM_PROMPT),
+        HumanMessage(content=(
+            "Analyze the following research paper and extract the requested "
+            "structured information.  Remember: preserve ALL LaTeX math and "
+            "pseudocode VERBATIM.\n\n"
+            f"---\n\n{paper_excerpt}"
+        )),
+    ]
+
+    structured: PaperStructuredOutput = structured_llm.invoke(messages)
+
+    # ── Step 3: Compute topo_order via BuildRepoDAG ─────────────────────
+    file_dag = structured.file_dag
+
+    # Ensure the DAG has at least the minimal HF structure
+    if not file_dag:
+        name = structured.architecture_name or "custom_model"
+        file_dag = {
+            f"configuration_{name}.py": [],
+            f"modeling_{name}.py": [f"configuration_{name}.py"],
+            "__init__.py": [
+                f"configuration_{name}.py",
+                f"modeling_{name}.py",
+            ],
+        }
+
+    # Validate: all referenced files must be in the file set
+    all_files = list(file_dag.keys())
+    for fname, deps in list(file_dag.items()):
+        file_dag[fname] = [d for d in deps if d in all_files]
+
+    # Ensure every file has an entry
+    for f in all_files:
+        if f not in file_dag:
+            file_dag[f] = []
+
+    _adjacency, topo_order = build_repo_dag(all_files, file_dag)
+
+    # ── Step 4: Build cleaned_markdown as structured string ─────────────
+    # Serialise the structured output into a readable string for
+    # downstream prompts (GoT coder injects this as context).
+    components_str = ""
+    for comp in structured.novel_components:
+        components_str += (
+            f"\n### {comp.name} ({comp.category})\n"
+            f"{comp.description}\n"
+        )
+
+    hyperparams_str = "\n".join(
+        f"  - {k}: {v}" for k, v in structured.hyperparameters.items()
+    )
+
+    cleaned_markdown = (
+        f"# Architecture: {structured.architecture_name}\n\n"
+        f"## Novel Components\n{components_str}\n"
+        f"## Hyperparameters\n{hyperparams_str}\n\n"
+        f"## File DAG\n"
+        + "\n".join(
+            f"  - {f} → depends on {deps}"
+            for f, deps in file_dag.items()
+        )
+        + f"\n\n## Topological Order\n{topo_order}\n\n"
+        f"## Raw Paper Excerpt\n{paper_excerpt[:8000]}\n"
+    )
+
+    # ── Return state update ─────────────────────────────────────────────
+    return {
+        "extracted_paper": raw_text,
+        "cleaned_markdown": cleaned_markdown,
+        "repo_dag": file_dag,
+        "topo_order": topo_order,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Alias for graph.py compatibility
+# ---------------------------------------------------------------------------
+# graph.py imports ``summarizer_node`` — route through run_summarizer
+# with logging and error handling.
+
+def summarizer_node(state: PipelineState) -> Dict[str, Any]:
+    """LangGraph node wrapper around :func:`run_summarizer`.
+
+    Adds message logging and error handling expected by the pipeline
+    orchestrator.
+    """
     messages = list(state.get("messages", []))
     errors = list(state.get("errors", []))
+    pdf_path = state.get("pdf_path", "")
 
-    messages.append(f"[Stage 1 - Summarizer] Processing PDF: {pdf_path}")
-
-    # ── Extract raw text ────────────────────────────────────────────────
-    if not pdf_path or not Path(pdf_path).exists():
-        errors.append(f"PDF not found: {pdf_path}")
-        return {"errors": errors, "messages": messages}
+    messages.append(f"[Stage 1 - Summarizer] Processing: {pdf_path or 'docs/paper_parsed.md'}")
 
     try:
-        raw_text = _extract_pdf_text(pdf_path)
-        messages.append(f"[Stage 1] Extracted {len(raw_text):,} chars from PDF")
-    except Exception as e:
-        errors.append(f"PDF extraction failed: {e}")
-        return {"errors": errors, "messages": messages}
+        result = run_summarizer(state)
 
-    # ── Structure extraction (Eqs. 2 & 3) ──────────────────────────────
-    title = _extract_title(raw_text)
-    abstract = _extract_abstract(raw_text)
-    headings = _extract_headings(raw_text)
-    equations = _extract_equations(raw_text)
-    algorithms = _extract_algorithms(raw_text)
-    captions = _extract_captions(raw_text)
-    references = _extract_references(raw_text)
-    paragraphs = _split_paragraphs(raw_text)
+        topo_order = result.get("topo_order", [])
+        messages.append(
+            f"[Stage 1 - Summarizer] ✅ Extracted {len(topo_order)} files "
+            f"in topo order: {topo_order}"
+        )
+        messages.append(
+            f"[Stage 1 - Summarizer] cleaned_markdown: "
+            f"{len(result.get('cleaned_markdown', '')):,} chars"
+        )
 
-    messages.append(
-        f"[Stage 1] Extracted: {len(headings)} headings, "
-        f"{len(equations)} equations, {len(algorithms)} algorithms, "
-        f"{len(captions)} captions, {len(references)} references, "
-        f"{len(paragraphs)} paragraphs"
-    )
+        result["messages"] = messages
+        result["errors"] = errors
+        return result
 
-    # ── Build ExtractedPaper ────────────────────────────────────────────
-    extracted = ExtractedPaper(
-        title=title,
-        abstract=abstract,
-        headings=headings,
-        paragraphs=paragraphs,
-        algorithms=algorithms,
-        captions=captions,
-        references=references,
-        equations=equations,
-        raw_markdown=raw_text,
-    )
-
-    # ── Clean markdown ──────────────────────────────────────────────────
-    cleaned = _clean_markdown(raw_text, headings)
-    messages.append(
-        f"[Stage 1] Cleaned markdown: {len(raw_text):,} → {len(cleaned):,} chars "
-        f"({100 * len(cleaned) / max(len(raw_text), 1):.0f}% retained)"
-    )
-
-    # ── Inject CFG rules ────────────────────────────────────────────────
-    if cfg_rules:
-        messages.append("[Stage 1] CFG rules injected into state for downstream agents")
-
-    # ── Validate completeness ───────────────────────────────────────────
-    if not equations:
-        messages.append("[Stage 1] ⚠️  No equations found — paper may lack inline LaTeX")
-    if not abstract:
-        messages.append("[Stage 1] ⚠️  Abstract not detected")
-
-    return {
-        "extracted_paper": extracted.model_dump(),
-        "cleaned_markdown": cleaned,
-        "messages": messages,
-        "errors": errors,
-    }
+    except Exception as exc:
+        errors.append(f"[Stage 1] Summarizer failed: {exc}")
+        messages.append(f"[Stage 1 - Summarizer] ❌ Failed: {exc}")
+        return {
+            "messages": messages,
+            "errors": errors,
+        }

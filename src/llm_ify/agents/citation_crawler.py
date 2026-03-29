@@ -1,102 +1,118 @@
 """Stage 2 — Citation Crawler Agent.
 
-Traverses the citation dependency graph G' = (V', E') from §3.2
-to resolve implicit dependencies via recursive multi-hop retrieval:
+Scans ``state["cleaned_markdown"]`` for components that reference an
+external citation but lack the exact mathematical formulation
+(e.g., "We adopt the distortion loss from [3]").
 
-    Dependencies(cᵢ) = {cᵢ} ∪ ⋃_{d ∈ cited(cᵢ)} Dependencies(d)
+Resolution strategy (in priority order):
+1. Check the local knowledge base (``.agent/skills/dependencies.md``)
+   for pre-resolved math / PyTorch snippets.
+2. Ask GPT-4o (which has web-search capability) to retrieve the
+   mathematical formulation and canonical PyTorch implementation
+   for the cited component.
 
-Component types extracted per hop:
-    1. Architectural modules (e.g., attention mechanisms, encoders)
-    2. Loss functions (e.g., cross-entropy variants, regularizers)
-    3. Training protocols (e.g., learning rate schedules, warmup)
-
-For the MVP, uses GPT-4o web search tool to retrieve paper details
-when arXiv IDs are available, otherwise falls back to direct LLM
-knowledge.
+Returns ``{"resolved_components": findings_dict}`` where each key is
+the component name and the value is the math + code snippet.
 
 References:
     Paper §3.2, Stage 2  — Compositional Dependency Resolution
-    Paper Figure 3       — NeRF citation dependency graphs
-    Table 5 ablation     — Citation recovery is HIGH priority (C: 1.0→0.65)
+    Paper Figure 3       — Citation dependency graphs
+    Table 5 ablation     — Citation recovery: HIGH priority (1.0→0.65)
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 from llm_ify.state import PipelineState
 
 
 # ---------------------------------------------------------------------------
-# Prompts
+# Constants
 # ---------------------------------------------------------------------------
 
-_DEPENDENCY_ANALYSIS_PROMPT = """\
-Analyze the following research paper and identify all technical dependencies
-that would be needed to implement this paper as a Hugging Face model.
+_LOCAL_KB_PATH = (
+    Path(__file__).resolve().parents[3] / ".agent" / "skills" / "dependencies.md"
+)
 
-For each dependency, identify:
-1. The component name (e.g., "rotary position embedding", "grouped query attention")
-2. The source paper or reference (if mentioned)
-3. The type: "architecture", "loss_function", or "training_protocol"
-4. A brief code snippet or mathematical formulation if available
+_MODEL_NAME = "gpt-4o"
+_TEMPERATURE = 0.1
+_MAX_TOKENS = 8192
 
-## Paper text:
-{paper_text}
-
-## Already-extracted references:
-{references}
-
-Return a JSON object:
-{{
-  "dependencies": [
-    {{
-      "component": "component name",
-      "source": "source paper or [ref_id]",
-      "type": "architecture|loss_function|training_protocol",
-      "description": "brief description",
-      "math": "mathematical formulation if available",
-      "code_hint": "PyTorch implementation hint"
-    }}
-  ],
-  "citation_graph": {{
-    "target_paper": ["dependency_paper_1", "dependency_paper_2"]
-  }}
-}}
-"""
-
-_COMPONENT_EXTRACTION_PROMPT = """\
-For the following referenced paper/component, provide the implementation
-details needed to use it in a Hugging Face transformers model:
-
-Component: {component}
-Source: {source}
-Type: {comp_type}
-Description: {description}
-
-Provide:
-1. The key mathematical formulation
-2. A PyTorch implementation snippet (using nn.Module)
-3. Any hyperparameters that should go in the Config
-
-Return ONLY a JSON object:
-{{
-  "math": "LaTeX or Unicode math formulation",
-  "pytorch_code": "class Component(nn.Module): ...",
-  "config_params": ["param_name: type = default", ...]
-}}
-"""
 
 # ---------------------------------------------------------------------------
-# LLM helper
+# Pydantic schemas for structured LLM output
 # ---------------------------------------------------------------------------
 
-def _get_llm(temperature: float = 0.2) -> ChatOpenAI:
-    return ChatOpenAI(model="gpt-4o", temperature=temperature, max_tokens=4096)
+class UnresolvedCitation(BaseModel):
+    """A single component whose math is missing and needs web resolution."""
+
+    component_name: str = Field(
+        ..., description="Name of the component (e.g. 'distortion loss', 'RMSNorm')"
+    )
+    source_reference: str = Field(
+        ..., description="The citation reference (e.g. '[3]', 'Mip-NeRF 360')"
+    )
+    context: str = Field(
+        "", description="Verbatim sentence from the paper mentioning this component"
+    )
+    category: str = Field(
+        "",
+        description="One of: 'loss_function', 'normalization', 'attention', "
+        "'encoding', 'architecture', 'training', 'activation', 'other'",
+    )
+
+
+class CitationAnalysis(BaseModel):
+    """Result of scanning the paper for unresolved citation dependencies."""
+
+    unresolved: List[UnresolvedCitation] = Field(
+        default_factory=list,
+        description="Components that reference a citation but lack the math",
+    )
+    already_defined: List[str] = Field(
+        default_factory=list,
+        description="Components whose math IS already present in the paper",
+    )
+
+
+class ResolvedComponent(BaseModel):
+    """A resolved component with math and PyTorch code."""
+
+    component_name: str = Field(..., description="Component name")
+    math_formulation: str = Field(
+        ...,
+        description=(
+            "The exact mathematical formulation in LaTeX.  Preserve all "
+            "$$...$$ and \\begin{equation} blocks verbatim."
+        ),
+    )
+    pytorch_snippet: str = Field(
+        ...,
+        description="A concise, working PyTorch implementation (nn.Module or function)",
+    )
+    source_paper: str = Field(
+        "", description="The paper this originates from"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_llm(temperature: float = _TEMPERATURE) -> ChatOpenAI:
+    return ChatOpenAI(
+        model=_MODEL_NAME,
+        temperature=temperature,
+        max_tokens=_MAX_TOKENS,
+    )
 
 
 def _call_llm(system: str, user: str) -> str:
@@ -108,132 +124,210 @@ def _call_llm(system: str, user: str) -> str:
     return response.content.strip()
 
 
-def _parse_json_response(text: str) -> Dict[str, Any]:
-    """Best-effort JSON extraction from LLM response."""
-    import re
-    text = text.strip()
-    # Remove code fences if present
-    text = re.sub(r"^```(?:json)?\s*\n?", "", text)
-    text = re.sub(r"\n?```\s*$", "", text)
-    # Find JSON object
-    match = re.search(r"\{[\s\S]+\}", text)
+def _load_local_knowledge_base() -> str:
+    """Read .agent/skills/dependencies.md if it exists."""
+    try:
+        return _LOCAL_KB_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def _search_local_kb(component_name: str, kb_text: str) -> Optional[str]:
+    """Check if a component is already resolved in the local KB.
+
+    Returns the full section text if found, else None.
+    """
+    if not kb_text:
+        return None
+
+    # Try to match a section heading containing the component name
+    # Section format: ## N. Component Name (...)
+    pattern = re.compile(
+        rf"##\s+\d+\.\s+.*?{re.escape(component_name)}.*?\n(.*?)(?=\n##\s|\Z)",
+        re.DOTALL | re.IGNORECASE,
+    )
+    match = pattern.search(kb_text)
     if match:
-        return json.loads(match.group())
-    return {}
+        return match.group(0).strip()
+
+    # Broader fuzzy match: check if the component name words appear
+    words = component_name.lower().split()
+    if len(words) >= 2:
+        for section in re.split(r"\n(?=## )", kb_text):
+            section_lower = section.lower()
+            if all(w in section_lower for w in words):
+                return section.strip()
+
+    return None
+
+
+def _resolve_via_web_search(component: UnresolvedCitation) -> Optional[str]:
+    """Use GPT-4o to search for and synthesise the math + PyTorch code.
+
+    GPT-4o has web-search capability; we ask it to find the canonical
+    formulation and return structured JSON.
+    """
+    system = (
+        "You are an expert ML researcher.  For the component described below, "
+        "provide:\n"
+        "1. The EXACT mathematical formulation (in LaTeX, preserve $$...$$ blocks)\n"
+        "2. A concise, working PyTorch implementation\n"
+        "3. The source paper\n\n"
+        "Search the web if needed to find the correct formulation.\n"
+        "Return ONLY a JSON object with keys: "
+        '"math_formulation", "pytorch_snippet", "source_paper".'
+    )
+    user = (
+        f"Component: {component.component_name}\n"
+        f"Referenced as: {component.source_reference}\n"
+        f"Category: {component.category}\n"
+        f"Context from paper: {component.context}\n\n"
+        "Find the mathematical formulation and provide a PyTorch implementation."
+    )
+
+    try:
+        response = _call_llm(system, user)
+        # Strip code fences if present
+        cleaned = re.sub(r"^```(?:json)?\s*\n?", "", response.strip())
+        cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+        # Extract JSON
+        json_match = re.search(r"\{[\s\S]+\}", cleaned)
+        if json_match:
+            data = json.loads(json_match.group())
+            # Format as a readable resolution block
+            math = data.get("math_formulation", "")
+            code = data.get("pytorch_snippet", "")
+            source = data.get("source_paper", component.source_reference)
+            return (
+                f"### {component.component_name} (from {source})\n\n"
+                f"**Mathematical Formulation:**\n{math}\n\n"
+                f"**PyTorch Implementation:**\n```python\n{code}\n```"
+            )
+    except Exception:
+        pass
+
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Main citation crawler node
+# Core engine
+# ---------------------------------------------------------------------------
+
+def run_citation_crawler(state: PipelineState) -> dict:
+    """Scan for unresolved citation dependencies and resolve them.
+
+    Steps
+    -----
+    1. Review ``state["cleaned_markdown"]`` for components that
+       reference an external citation but lack the exact math.
+    2. For each missing dependency:
+       a. Check the local knowledge base (``.agent/skills/dependencies.md``)
+       b. If not found locally, use GPT-4o web search to retrieve
+          the math + PyTorch implementation.
+    3. Aggregate findings and return
+       ``{"resolved_components": findings_dict}``.
+
+    Parameters
+    ----------
+    state : PipelineState
+
+    Returns
+    -------
+    dict
+        ``{"resolved_components": {component_name: resolution_text}}``
+    """
+    cleaned_markdown: str = state.get("cleaned_markdown", "")
+
+    if not cleaned_markdown:
+        return {"resolved_components": {}}
+
+    # ── Step 1: Detect unresolved citations via structured LLM output ───
+    llm = _get_llm()
+    analysis_llm = llm.with_structured_output(CitationAnalysis)
+
+    analysis_messages = [
+        SystemMessage(content=(
+            "You are an expert at analyzing ML research papers.  "
+            "Identify components that reference an external citation but "
+            "whose mathematical formulation is NOT present in the paper text.\n\n"
+            "Examples of unresolved references:\n"
+            '- "We adopt the distortion loss from [3]"\n'
+            '- "Following [17], we use RMSNorm"\n'
+            '- "The hash encoding of [33] is used"\n\n'
+            "Do NOT flag components whose math IS already defined in the text."
+        )),
+        HumanMessage(content=(
+            "Analyze this paper for unresolved citation dependencies:\n\n"
+            f"---\n\n{cleaned_markdown[:20000]}"
+        )),
+    ]
+
+    try:
+        analysis: CitationAnalysis = analysis_llm.invoke(analysis_messages)
+        unresolved = analysis.unresolved
+    except Exception:
+        # Fallback: no unresolved components detected
+        unresolved = []
+
+    if not unresolved:
+        return {"resolved_components": {}}
+
+    # ── Step 2: Resolve each missing dependency ─────────────────────────
+    local_kb = _load_local_knowledge_base()
+    resolved_components: Dict[str, str] = {}
+
+    for citation in unresolved:
+        name = citation.component_name
+
+        # 2a. Check local knowledge base first
+        local_hit = _search_local_kb(name, local_kb)
+        if local_hit:
+            resolved_components[name] = local_hit
+            continue
+
+        # 2b. Fall back to GPT-4o web search
+        web_result = _resolve_via_web_search(citation)
+        if web_result:
+            resolved_components[name] = web_result
+
+    # ── Return state update ─────────────────────────────────────────────
+    return {"resolved_components": resolved_components}
+
+
+# ---------------------------------------------------------------------------
+# Alias for graph.py compatibility
 # ---------------------------------------------------------------------------
 
 def citation_crawler_node(state: PipelineState) -> Dict[str, Any]:
-    """Resolve citation dependencies for the extracted paper.
+    """LangGraph node wrapper around :func:`run_citation_crawler`.
 
-    Analyzes the paper to identify technical dependencies,
-    then for each dependency extracts implementation details.
+    Adds message logging and error handling.
     """
-    extracted_paper = state.get("extracted_paper", {})
-    cleaned_markdown = state.get("cleaned_markdown", "")
     messages = list(state.get("messages", []))
     errors = list(state.get("errors", []))
 
-    messages.append("[Stage 2 - Citation Crawler] Analyzing dependencies...")
-
-    if not cleaned_markdown and not extracted_paper:
-        errors.append("[Stage 2] No paper content available")
-        return {"errors": errors, "messages": messages}
-
-    # ── Step 1: Identify dependencies from the paper ────────────────────
-    references_text = ""
-    if extracted_paper and "references" in extracted_paper:
-        refs = extracted_paper["references"]
-        references_text = "\n".join(
-            f"{r.get('ref_id', '?')}: {r.get('title', '')}"
-            for r in refs[:30]  # Limit to first 30 refs
-        )
+    messages.append("[Stage 2 - Citation Crawler] Scanning for unresolved dependencies...")
 
     try:
-        system = (
-            "You are an expert at analyzing ML research papers and identifying "
-            "technical dependencies needed for implementation. Focus on "
-            "architectural components, loss functions, and training protocols."
+        result = run_citation_crawler(state)
+
+        resolved = result.get("resolved_components", {})
+        messages.append(
+            f"[Stage 2 - Citation Crawler] ✅ Resolved {len(resolved)} dependencies"
         )
-        user = _DEPENDENCY_ANALYSIS_PROMPT.format(
-            paper_text=cleaned_markdown[:10000],
-            references=references_text,
-        )
+        if resolved:
+            for name in resolved:
+                messages.append(f"[Stage 2]   • {name}")
 
-        response = _call_llm(system, user)
-        dep_analysis = _parse_json_response(response)
-    except Exception as e:
-        messages.append(f"[Stage 2] ⚠️ Dependency analysis failed: {e}")
-        dep_analysis = {"dependencies": [], "citation_graph": {}}
+        result["messages"] = messages
+        result["errors"] = errors
+        return result
 
-    dependencies = dep_analysis.get("dependencies", [])
-    citation_graph = dep_analysis.get("citation_graph", {})
-
-    messages.append(
-        f"[Stage 2] Found {len(dependencies)} dependencies, "
-        f"{len(citation_graph)} citation graph entries"
-    )
-
-    # ── Step 2: Extract implementation details for critical deps ────────
-    resolved_components: Dict[str, str] = {}
-    crawled_papers: Dict[str, Dict[str, Any]] = {}
-
-    # Only process the most important dependencies (limit API calls)
-    critical_deps = [
-        d for d in dependencies
-        if d.get("type") in ("architecture", "loss_function")
-    ][:10]
-
-    for dep in critical_deps:
-        component_name = dep.get("component", "unknown")
-        messages.append(f"[Stage 2] Resolving: {component_name}")
-
-        try:
-            system = (
-                "You are a PyTorch implementation expert. Provide precise, "
-                "working code for the requested component."
-            )
-            user = _COMPONENT_EXTRACTION_PROMPT.format(
-                component=component_name,
-                source=dep.get("source", "unknown"),
-                comp_type=dep.get("type", "architecture"),
-                description=dep.get("description", ""),
-            )
-
-            response = _call_llm(system, user)
-            comp_data = _parse_json_response(response)
-
-            if comp_data:
-                resolved_components[component_name] = json.dumps(comp_data)
-                crawled_papers[component_name] = {
-                    "component": component_name,
-                    "source": dep.get("source", ""),
-                    "type": dep.get("type", ""),
-                    "implementation": comp_data,
-                }
-                messages.append(
-                    f"[Stage 2] ✅ Resolved: {component_name}"
-                )
-            else:
-                messages.append(
-                    f"[Stage 2] ⚠️ Could not resolve: {component_name}"
-                )
-
-        except Exception as e:
-            messages.append(f"[Stage 2] ⚠️ Failed to resolve {component_name}: {e}")
-
-    messages.append(
-        f"[Stage 2 - Citation Crawler] ✅ Resolved {len(resolved_components)}"
-        f"/{len(critical_deps)} critical dependencies"
-    )
-
-    return {
-        "citation_graph": citation_graph,
-        "resolved_components": resolved_components,
-        "crawled_papers": crawled_papers,
-        "messages": messages,
-        "errors": errors,
-    }
+    except Exception as exc:
+        errors.append(f"[Stage 2] Citation crawler failed: {exc}")
+        messages.append(f"[Stage 2 - Citation Crawler] ❌ Failed: {exc}")
+        return {
+            "resolved_components": {},
+            "messages": messages,
+            "errors": errors,
+        }

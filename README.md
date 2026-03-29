@@ -1,77 +1,50 @@
-# LLM-IFY
+# LLM-IFY 🚀
 
-A multi-agent framework for turning research papers into Hugging Face-compatible PyTorch repositories.
+Automating the translation of Deep Learning research papers into production-ready Hugging Face PyTorch repositories.
 
-Inspired by the NERFIFY paper ([arXiv:2603.00805v1](https://arxiv.org/abs/2603.00805v1)), LLM-IFY adapts the domain-specific paper-to-code paradigm from Nerfstudio/NeRF to the Hugging Face transformers ecosystem.
+## 🤔 Why was it created?
 
-## Architecture
+Implementing complex AI models from research papers often involves days of untangling dense mathematical notation, tracking down implicit dependencies from older papers, and ensuring strict compliance with frameworks like Hugging Face `transformers`. 
 
-LLM-IFY is a **LangGraph orchestrator** with four pipeline stages:
+**LLM-IFY** was created to automate this painstaking process. Inspired by the **NERFIFY** paper ([arXiv:2603.00805v1](https://arxiv.org/abs/2603.00805v1)), it tackles the structural and semantic gaps between academic PDFs and functional code. By introducing formal grammar constraints and closed-loop testing, LLM-IFY reliably generates state-of-the-art model implementations that pass structural shape checks right out of the box.
 
-```
-PDF → [Summarizer] → [Citation Crawler] → [GoT Coder] → [Critique] → HF Repository
-            │                │                  │              │
-         Stage 1          Stage 2           Stage 3        Stage 4
-       PyMuPDF parse   Dependency BFS    GPT-4o code gen  Smoke-test
-```
+## 🤖 What is it?
 
-### Stage 1 — Summarizer
-Parses research paper PDFs via PyMuPDF, extracting structured representations: headings, equations (LaTeX preserved), algorithms, figure captions, and bibliography.
+LLM-IFY is a multi-agent LangGraph orchestrator powered by GPT-4o. It features a four-stage pipeline:
 
-### Stage 2 — Citation Crawler
-Resolves implicit dependencies via recursive multi-hop retrieval over the citation graph. Extracts architectural modules, loss functions, and training protocols.
+1. **📄 Paper Summarizer**: Parses standard academic PDFs (via `fitz`/PyMuPDF), extracting exact mathematical formulations, pseudo-algorithms, and architectural novelties without losing structural integrity.
+2. **🕸️ Citation Crawler**: Detects implicit math dependencies (e.g., "We use the memory-efficient attention from [14]") and iteratively resolves them using web search or a localized Knowledge Base.
+3. **🧠 Graph-of-Thought (GoT) Coder**: Generates complex multi-file repositories in topological order. It strictly obeys a Context-Free Grammar (CFG) enforcing that classes inherit `PreTrainedModel` or `PretrainedConfig`, and that `forward()` signatures follow the Hugging Face spec.
+4. **🕵️ Critique & Self-Healing**: Automatically executes an import and runtime smoke-test on the generated model (e.g., running 50 dummy training steps). It feeds any OOM, shape mismatch, or syntax stack traces back to the coder for continuous refinement until convergence.
 
-### Stage 3 — GoT Coder (Graph-of-Thought)
-Generates HF-compliant PyTorch code in topological DAG order using three phases:
-1. **DAG Construction** — maps paper to HF component dependency graph
-2. **Interface Freeze** — generates stub files with signatures only
-3. **Implementation** — fills method bodies with paper math → PyTorch
+## 🛠️ How to use it
 
-### Stage 4 — Critique
-Validates generated code with 7 static analysis checks and import smoke-tests. Triggers repair loops (max 5 iterations) when issues are found.
+### Prerequisites
 
-## Generated Code Contract (CFG)
-
-All output code strictly follows the Hugging Face transformers API:
-- Configuration classes inherit from `PretrainedConfig`
-- Model classes inherit from `PreTrainedModel`
-- `forward()` accepts `input_ids` and `attention_mask`, returns `CausalLMOutputWithPast`
-- Serialization via `save_pretrained()` / `from_pretrained()`
-
-See [`.agent/rules/hf_cfg.md`](.agent/rules/hf_cfg.md) for the full grammar specification.
-
-## Project Structure
-
-```
-src/llm_ify/
-  graph.py                  # LangGraph StateGraph orchestration
-  state.py                  # TypedDict defining the graph state
-  agents/
-    summarizer.py           # Stage 1: PyMuPDF parsing + CFG injection
-    citation_crawler.py     # Stage 2: Dependency resolution via GPT-4o
-    got_coder.py            # Stage 3: GoT code generation in DAG order
-    critique.py             # Stage 4: Smoke-tests + diagnostic patching
-  pipeline/
-    dag.py                  # Kahn's algorithm for topological sorting
-```
-
-## Quickstart
+Ensure you have Python 3.9+ and the required packages:
 
 ```bash
-# Install dependencies
-pip install langchain langgraph langchain-openai pymupdf networkx pydantic
-
-# Set API key
-export OPENAI_API_KEY="sk-..."
-
-# Run pipeline
-python -c "
-from llm_ify.graph import run_pipeline
-result = run_pipeline('path/to/paper.pdf', open('.agent/rules/hf_cfg.md').read())
-print(result['final_repository'])
-"
+pip install langchain langchain-openai langgraph pydantic pymupdf
 ```
 
-## License
+You must also have an OpenAI api key set:
 
-[Apache License 2.0](LICENSE)
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+### Running the Pipeline
+
+You can kick off the entire end-to-end framework using the root runner script. 
+
+```bash
+python run_pipeline.py
+```
+
+This will:
+1. Spin up the LangGraph application.
+2. Read the initial research text (`docs/paper_parsed.md` or a provided PDF).
+3. Inject the `hf_cfg.md` rules.
+4. Stream the real-time agent state, allowing you to watch the DAG construction, interface freezes, and smoke tests negotiate with each other.
+
+Once the critique agent gives the green light, the generated Hugging Face-compliant files will be deposited into the `output/` directory, ready to be imported and trained! 
