@@ -34,6 +34,7 @@ from typing import Any, Dict, List
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+from llm_ify.pipeline.ast_parser import extract_signatures
 from llm_ify.state import PipelineState
 
 
@@ -131,9 +132,10 @@ def _build_dependency_code_section(
             break
         code = generated_files.get(f)
         if code:
+            stub = extract_signatures(code)
             sections.append(
                 f"# ═══════ {f} ═══════\n"
-                f"```python\n{code}\n```"
+                f"```python\n{stub}\n```"
             )
     if not sections:
         return "(No upstream files generated yet.)"
