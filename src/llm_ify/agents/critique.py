@@ -26,6 +26,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from e2b_code_interpreter import Sandbox
 from llm_ify.state import DiagnosticReport, PipelineState
 
 
@@ -140,59 +141,69 @@ def _try_syntax_check(code: str, filename: str) -> Optional[str]:
         return f"{filename}: Syntax error at line {e.lineno}: {e.msg}"
 
 
-def _try_import_smoke_test(
+def _run_sandbox_smoke_test(
     files: Dict[str, str],
     messages: List[str],
 ) -> List[str]:
-    """Write files to a temp directory and attempt to import them.
+    """Write files to an E2B Sandbox and attempt to import them securely.
 
     Returns a list of import error descriptions.
     """
     errors = []
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        pkg_dir = Path(tmpdir) / "generated_model"
-        pkg_dir.mkdir()
+    # 1. Dynamically write smoke_test.py content
+    imports = []
+    for f in files:
+        if f.endswith(".py") and f != "__init__.py":
+            mod = f.replace(".py", "")
+            imports.append(f"import {mod}")
 
-        # Write all files
-        for filename, code in files.items():
-            filepath = pkg_dir / filename
-            filepath.write_text(code)
+    test_script_code = f"""import sys
+import os
+sys.path.insert(0, os.path.abspath('./src/llm_ify/generated'))
 
-        # Ensure __init__.py exists
-        init_path = pkg_dir / "__init__.py"
-        if not init_path.exists():
-            init_path.write_text("")
+try:
+{chr(10).join("    " + i for i in imports)}
+    print("SUCCESS")
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+"""
 
-        # Add to sys.path temporarily
-        sys.path.insert(0, tmpdir)
-        try:
-            for filename in files:
-                if filename == "__init__.py":
-                    continue
-                module_name = f"generated_model.{filename.replace('.py', '')}"
-                try:
-                    spec = importlib.util.spec_from_file_location(
-                        module_name, pkg_dir / filename
-                    )
-                    if spec and spec.loader:
-                        module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(module)
-                        messages.append(
-                            f"[Stage 4] ✅ Import OK: {filename}"
-                        )
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    # Get just the last meaningful line
-                    short_err = str(e)[:200]
-                    errors.append(f"{filename}: Import failed — {short_err}")
-                    messages.append(f"[Stage 4] ❌ Import FAIL: {filename}: {short_err}")
-        finally:
-            sys.path.pop(0)
-            # Clean up imported modules
-            for key in list(sys.modules.keys()):
-                if key.startswith("generated_model"):
-                    del sys.modules[key]
+    messages.append("[Stage 4] 🛡️ Launching secure E2B Sandbox...")
+    try:
+        with Sandbox() as sbx:
+            # 2. Upload generated_files into the appropriate mock structure
+            sbx.commands.run("mkdir -p ./src/llm_ify/generated")
+            for filename, code in files.items():
+                sbx.files.write(f"./src/llm_ify/generated/{filename}", code)
+                
+            # Provide an empty init if missing to make it a module
+            if "__init__.py" not in files:
+                sbx.files.write("./src/llm_ify/generated/__init__.py", "")
+
+            # 3. Upload smoke_test.py script
+            sbx.files.write("smoke_test.py", test_script_code)
+
+            # 4. Execute the test securely inside the sandbox
+            execution = sbx.commands.run("python smoke_test.py")
+
+            if execution.exit_code != 0:
+                stderr = execution.stderr if execution.stderr else "Unknown error"
+                # Keep the last 500 characters of the stack trace
+                short_err = stderr[-500:]
+                errors.append(f"Sandbox execution failed — {short_err}")
+                
+                # Add a brief summary for messages
+                err_line = stderr.strip().splitlines()[-1] if stderr.strip() else "Crash"
+                messages.append(f"[Stage 4] ❌ Sandbox FAIL: {err_line}")
+            else:
+                messages.append(f"[Stage 4] ✅ Sandbox execution/imports OK")
+
+    except Exception as e:
+        messages.append(f"[Stage 4] ❌ E2B Sandbox Connection Error: {e}")
+        errors.append(f"E2B Sandbox initialization failed: {e}")
 
     return errors
 
@@ -273,8 +284,8 @@ def critique_node(state: PipelineState) -> Dict[str, Any]:
     # ── Static analysis ─────────────────────────────────────────────────
     static_issues = _run_static_checks(code_files, messages)
 
-    # ── Import smoke test ───────────────────────────────────────────────
-    import_issues = _try_import_smoke_test(code_files, messages)
+    # ── Import smoke test via Secure Sandbox ────────────────────────────
+    import_issues = _run_sandbox_smoke_test(code_files, messages)
 
     # ── Build diagnostics ───────────────────────────────────────────────
     all_issues = static_issues + import_issues
